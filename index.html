@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Event Roster Formatter</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=SF+Pro+Display:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #1e1e1e;
+      --card-bg: rgba(36, 37, 44, 0.75);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --text: #f0f0f3;
+      --muted: #8e8e93;
+      --accent: #0a84ff;
+      --accent-hover: #409cff;
+      --success: #30d158;
+      --toolbar-bg: rgba(45, 45, 50, 0.8);
+      --input-bg: #141416;
+      --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      --font-mono: "JetBrains Mono", SFMono-Regular, Menual, Monaco, Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      background-image: 
+        radial-gradient(at 0% 0%, rgba(10, 132, 255, 0.12) 0px, transparent 50%),
+        radial-gradient(at 100% 100%, rgba(48, 209, 88, 0.08) 0px, transparent 50%);
+      color: var(--text);
+      font-family: var(--font-sans);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 24px;
+    }
+
+    /* macOS Window Shell */
+    .mac-window {
+      width: 100%;
+      max-width: 1100px;
+      height: calc(100vh - 48px);
+      background: var(--card-bg);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.05);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* Window Header */
+    .titlebar {
+      height: 40px;
+      background: var(--toolbar-bg);
+      border-bottom: 1px solid var(--card-border);
+      display: flex;
+      align-items: center;
+      padding: 0 14px;
+      position: relative;
+      user-select: none;
+    }
+
+    .traffic-lights {
+      display: flex;
+      gap: 8px;
+    }
+    .traffic-light {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+    }
+    .close { background: #ff5f56; border: 0.5px solid #e0443e; }
+    .minimize { background: #ffbd2e; border: 0.5px solid #dea123; }
+    .maximize { background: #27c93f; border: 0.5px solid #1aab29; }
+
+    .window-title {
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--muted);
+      letter-spacing: -0.2px;
+    }
+
+    /* App Body Grid */
+    .content {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1px;
+      background: var(--card-border);
+      overflow: hidden;
+    }
+
+    .pane {
+      background: var(--bg);
+      display: flex;
+      flex-direction: column;
+      padding: 16px;
+      gap: 12px;
+    }
+
+    .pane-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 32px;
+    }
+
+    .pane-title {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--muted);
+    }
+
+    textarea {
+      flex: 1;
+      background: var(--input-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 13px;
+      line-height: 1.5;
+      padding: 14px;
+      resize: none;
+      outline: none;
+      transition: border-color 0.15s ease;
+    }
+
+    textarea:focus {
+      border-color: var(--accent);
+    }
+
+    /* Buttons */
+    .btn {
+      background: var(--accent);
+      color: #ffffff;
+      border: none;
+      border-radius: 6px;
+      padding: 6px 14px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+    }
+
+    .btn:hover { background: var(--accent-hover); }
+    .btn:active { transform: scale(0.98); }
+
+    .btn-secondary {
+      background: rgba(255,255,255,0.08);
+      color: var(--text);
+    }
+    .btn-secondary:hover { background: rgba(255,255,255,0.14); }
+
+    .toast {
+      position: fixed;
+      bottom: 40px;
+      left: 50%;
+      transform: translateX(-50%) translateY(20px);
+      background: rgba(48, 209, 88, 0.95);
+      color: #000;
+      padding: 8px 16px;
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: 600;
+      opacity: 0;
+      pointer-events: none;
+      transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+    }
+    .toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+  </style>
+</head>
+<body>
+
+  <div class="mac-window">
+    <div class="titlebar">
+      <div class="traffic-lights">
+        <div class="traffic-light close"></div>
+        <div class="traffic-light minimize"></div>
+        <div class="traffic-light maximize"></div>
+      </div>
+      <div class="window-title">Event Formatter for WhatsApp</div>
+    </div>
+
+    <div class="content">
+      <!-- Input Pane -->
+      <div class="pane">
+        <div class="pane-header">
+          <span class="pane-title">Input (Raw WhatsApp Block)</span>
+          <button class="btn btn-secondary" onclick="clearInput()">Clear</button>
+        </div>
+        <textarea id="inputText" placeholder="Paste blocks here...
+
+Nama: Ms Lim
+No phone: 016-2282102
+Tarikh: 08/08/2026
+Tempat: Kuantan Parade
+Type of event: Conference
+Masa Event: 9.00AM - 3.00PM
+Session Hour: 6 Hours"></textarea>
+      </div>
+
+      <!-- Output Pane -->
+      <div class="pane">
+        <div class="pane-header">
+          <span class="pane-title">Output (Formatted Roster)</span>
+          <button class="btn" onclick="copyOutput()">Copy Output</button>
+        </div>
+        <textarea id="outputText" readonly placeholder="Formatted output will appear here automatically..."></textarea>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast">Copied to Clipboard!</div>
+
+  <script>
+    const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+    function parseTime(timeStr) {
+      if (!timeStr) return null;
+      const cleanStr = timeStr.trim().toUpperCase();
+      const match = cleanStr.match(/(\d{1,2})[\.:](\d{2})\s*(AM|PM)?/);
+      if (!match) return null;
+
+      let hours = parseInt(match[1], 10);
+      const minutes = parseInt(match[2], 10);
+      const period = match[3];
+
+      if (period === 'PM' && hours < 12) hours += 12;
+      if (period === 'AM' && hours === 12) hours = 0;
+
+      return { hours, minutes };
+    }
+
+    function formatTime12(hours, minutes) {
+      const period = hours >= 12 ? 'pm' : 'am';
+      let h12 = hours % 12;
+      if (h12 === 0) h12 = 12;
+      const mStr = minutes.toString().padStart(2, '0');
+      return `${h12}.${mStr}${period}`;
+    }
+
+    function parseDate(dateStr) {
+      if (!dateStr) return null;
+      const parts = dateStr.trim().split(/[\/\.-]/);
+      if (parts.length < 3) return null;
+
+      const d = parseInt(parts[0], 10);
+      const m = parseInt(parts[1], 10);
+      let y = parseInt(parts[2], 10);
+
+      if (y < 100) y += 2000;
+
+      const dateObj = new Date(y, m - 1, d);
+      if (isNaN(dateObj.getTime())) return null;
+
+      const dd = d.toString().padStart(2, '0');
+      const mm = m.toString().padStart(2, '0');
+      const dayName = days[dateObj.getDay()];
+
+      return `${dd}/${mm}/${y} (${dayName})`;
+    }
+
+    function formatBlock(block) {
+      const lines = block.split('\n');
+      const data = {};
+
+      lines.forEach(line => {
+        const colonIdx = line.indexOf(':');
+        if (colonIdx !== -1) {
+          const key = line.substring(0, colonIdx).trim().toLowerCase();
+          const val = line.substring(colonIdx + 1).trim();
+          data[key] = val;
+        }
+      });
+
+      if (!data['tarikh'] && !data['tempat']) return '';
+
+      // 1. Tarikh
+      const formattedDate = parseDate(data['tarikh']) || data['tarikh'] || '';
+
+      // 2. Tempat & 3. Type of event
+      const tempat = data['tempat'] || '';
+      const typeOfEvent = data['type of event'] || '';
+
+      // 4. Masa Event & Call Time & Session Hours
+      let masaEventFormatted = data['masa event'] || '';
+      let callTimeFormatted = '';
+      let totalHours = 0;
+      let sessionHoursStr = data['session hour'] || '';
+
+      if (data['masa event']) {
+        const timeParts = data['masa event'].split('-');
+        if (timeParts.length === 2) {
+          const start = parseTime(timeParts[0]);
+          const end = parseTime(timeParts[1]);
+
+          if (start && end) {
+            masaEventFormatted = `${formatTime12(start.hours, start.minutes)} - ${formatTime12(end.hours, end.minutes)}`;
+            
+            // Call time = 1 hr before start
+            let callH = start.hours - 1;
+            if (callH < 0) callH += 24;
+            callTimeFormatted = `*${formatTime12(callH, start.minutes)}*`;
+
+            // Calculate session hours
+            let durationMins = (end.hours * 60 + end.minutes) - (start.hours * 60 + start.minutes);
+            if (durationMins < 0) durationMins += 24 * 60; // overnight event edge case
+            const calcSessionHours = Math.round(durationMins / 60);
+            
+            sessionHoursStr = `${calcSessionHours} Hours`;
+            totalHours = calcSessionHours + 1;
+          }
+        }
+      }
+
+      // 5. Rate & Pay
+      const isKemaman = tempat.toLowerCase().includes('kemaman');
+      const rateVal = isKemaman ? 15 : 15; // default rate RM15/h
+      const totalPay = totalHours * rateVal;
+
+      return `Tarikh: ${formattedDate}
+Tempat: ${tempat}
+Type of event: ${typeOfEvent}
+Call Time: ${callTimeFormatted}
+Masa Event: ${masaEventFormatted}
+Session Hour: ${sessionHoursStr}
+Rate: RM ${rateVal}/h
+Total Hours: ${totalHours} Hours
+Total Pay: RM ${totalPay}
+Roster:`;
+    }
+
+    function processInput() {
+      const raw = document.getElementById('inputText').value;
+      const blocks = raw.split(/\n\s*\n/);
+      const formatted = blocks
+        .map(b => formatBlock(b))
+        .filter(b => b.length > 0)
+        .join('\n-----------------------------------------\n');
+
+      document.getElementById('outputText').value = formatted;
+    }
+
+    function copyOutput() {
+      const output = document.getElementById('outputText');
+      if (!output.value) return;
+      
+      output.select();
+      navigator.clipboard.writeText(output.value);
+
+      const toast = document.getElementById('toast');
+      toast.classList.add('show');
+      setTimeout(() => toast.classList.remove('show'), 2000);
+    }
+
+    function clearInput() {
+      document.getElementById('inputText').value = '';
+      document.getElementById('outputText').value = '';
+    }
+
+    document.getElementById('inputText').addEventListener('input', processInput);
+    processInput();
+  </script>
+</body>
+</html>
