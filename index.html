@@ -440,7 +440,7 @@
             <button type="button" class="btn btn-secondary" id="btn-clear">Clear</button>
           </div>
         </div>
-        <textarea id="inputText" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste blocks here...
+        <textarea id="inputText" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste one or many blocks here...
 
 Nama: Ms Lim
 No phone: 016-2282102
@@ -485,25 +485,66 @@ Session Hour: 6 Hours"></textarea>
 
     /* ---------------- parsing ---------------- */
 
-    // Accepts 9, 9AM, 9 am, 9.00, 9:00, 9.00AM, 9.00 a.m. — minutes and the
-    // am/pm marker are both optional, because WhatsApp bookings never agree.
+    // Nobody works a booking longer than this, so an ambiguous "11 - 1ptg" is
+    // read as 11am - 1pm rather than 11pm - 1pm. Anything that still comes out
+    // longer is held back for confirmation instead of being priced.
+    const MAX_SESSION_HOURS = 8;
+
+    // Malay time-of-day markers, longest first so "tengah malam" is not eaten
+    // by "malam" and "tengah hari" is not eaten by the bare "tgh".
+    const MALAY_PERIODS = [
+      { re: /\b(?:tengah|tgh|tg)\s*malam\b/, period: 'MIDNIGHT' },
+      { re: /\b(?:tengah\s*hari|tengahari|tgh\s*hari|tghari|tghri|thari|tgh)\b/, period: 'NOON' },
+      { re: /\b(?:petang|ptg|ptng)\b/, period: 'PM' },
+      { re: /\b(?:malam|mlm)\b/, period: 'NIGHT' },
+      { re: /\b(?:pagi|pgi|pg|subuh)\b/, period: 'AM' }
+    ];
+
+    // Accepts 9, 9AM, 9 am, 9.00, 9:00, 9.00AM, 9.00 a.m., and the Malay
+    // markers people actually type — 11 pagi, 12 tghari, 1 ptg, 8 malam.
     function parseTime(timeStr) {
       if (!timeStr) return null;
-      const s = timeStr.toUpperCase().replace(/[\s.]*([AP])\.?M\.?\s*$/, '$1M').replace(/\s+/g, '');
-      const match = s.match(/^(\d{1,2})(?:[.:h](\d{2}))?(AM|PM)?$/);
+
+      let s = String(timeStr).toLowerCase().replace(/\b(?:pukul|jam)\b/g, ' ').trim();
+      let period = null;
+
+      for (let i = 0; i < MALAY_PERIODS.length; i++) {
+        if (MALAY_PERIODS[i].re.test(s)) {
+          period = MALAY_PERIODS[i].period;
+          s = s.replace(MALAY_PERIODS[i].re, ' ');
+          break;
+        }
+      }
+
+      s = s.replace(/\s+/g, '');
+
+      const eng = s.match(/([ap])\.?m\.?$/);
+      if (eng) {
+        if (!period) period = eng[1] === 'a' ? 'AM' : 'PM';
+        s = s.slice(0, eng.index);
+      }
+
+      s = s.replace(/[^0-9.:h]/g, '').replace(/[.:h]+$/, '');
+      const match = s.match(/^(\d{1,2})(?:[.:h](\d{2}))?$/);
       if (!match) return null;
 
       let hours = parseInt(match[1], 10);
       const minutes = match[2] ? parseInt(match[2], 10) : 0;
-      const period = match[3];
 
       if (hours > 23 || minutes > 59) return null;
       if (period && hours > 12) return null;
 
-      if (period === 'PM' && hours < 12) hours += 12;
-      if (period === 'AM' && hours === 12) hours = 0;
+      switch (period) {
+        case 'AM':       if (hours === 12) hours = 0; break;
+        case 'PM':       if (hours < 12) hours += 12; break;
+        // 12 tengahari is noon and 11 tengahari is still morning; 1-4 are the afternoon.
+        case 'NOON':     if (hours >= 1 && hours <= 4) hours += 12; break;
+        // 12 malam is midnight, 1-4 malam are the small hours, the rest are evening.
+        case 'NIGHT':    if (hours === 12) hours = 0; else if (hours >= 5) hours += 12; break;
+        case 'MIDNIGHT': if (hours === 12) hours = 0; break;
+      }
 
-      return { hours, minutes, hasPeriod: Boolean(period) };
+      return { hours: hours, minutes: minutes, hasPeriod: Boolean(period) };
     }
 
     function toMinutes(t) {
@@ -512,28 +553,61 @@ Session Hour: 6 Hours"></textarea>
 
     // Splits "9.00AM - 3.00PM" on hyphen, en/em dash, or the word "to".
     function splitRange(str) {
-      const parts = str.split(/\s*(?:-|–|—|~|\bto\b|\bhingga\b|\bsehingga\b)\s*/i).filter(p => p.trim());
+      const parts = str.split(/\s*(?:-|–|—|~|\bto\b|\bhingga\b|\bsehingga\b|\bsampai\b)\s*/i).filter(p => p.trim());
       return parts.length === 2 ? parts : null;
     }
 
-    // "9 - 3PM" only makes sense if the 9 is AM. When the start time carries no
-    // marker, pick the reading that yields a sane forward-running session.
+    // A time with no am/pm marker could be either. 12 and above are already
+    // unambiguous; anything below gets its afternoon twin as a second reading.
+    function alternatives(t) {
+      if (t.hasPeriod || t.hours >= 12) return [t];
+      return [t, { hours: t.hours + 12, minutes: t.minutes, hasPeriod: false }];
+    }
+
+    // Jobs start between these hours, so a bare "2 - 6" is an afternoon job
+    // rather than one beginning at two in the morning.
+    const WORKDAY_START_MIN = 6 * 60;
+    const WORKDAY_START_MAX = 21 * 60;
+
+    // Prefer the reading that looks like a real working day: inside the 8-hour
+    // maximum, not running past midnight, starting at a civilised hour, and
+    // earlier rather than later. That is what makes "11 - 1ptg" a 2-hour
+    // lunchtime job instead of a 14-hour overnight one.
+    function isBetterRange(a, b) {
+      const keys = function (c) {
+        const startMins = toMinutes(c.start);
+        return [
+          c.duration > 0 && c.duration <= MAX_SESSION_HOURS * 60 ? 0 : 1,
+          c.wraps ? 1 : 0,
+          startMins >= WORKDAY_START_MIN && startMins <= WORKDAY_START_MAX ? 0 : 1,
+          startMins,
+          c.duration
+        ];
+      };
+      const ka = keys(a), kb = keys(b);
+      for (let i = 0; i < ka.length; i++) {
+        if (ka[i] !== kb[i]) return ka[i] < kb[i];
+      }
+      return false;
+    }
+
     function resolveRange(startRaw, endRaw) {
       const start = parseTime(startRaw);
       const end = parseTime(endRaw);
       if (!start || !end) return null;
 
-      if (!start.hasPeriod && start.hours < 12) {
-        const asAm = toMinutes(start);
-        const asPm = toMinutes({ hours: start.hours + 12, minutes: start.minutes });
-        const endMins = toMinutes(end);
-        if (endMins - asAm <= 0 && endMins - asPm > 0) start.hours += 12;
-      }
+      let best = null;
+      alternatives(start).forEach(function (s) {
+        alternatives(end).forEach(function (e) {
+          let duration = toMinutes(e) - toMinutes(s);
+          const wraps = duration <= 0;
+          if (wraps) duration += 24 * 60;   // event runs past midnight
+          const candidate = { start: s, end: e, duration: duration, wraps: wraps };
+          if (!best || isBetterRange(candidate, best)) best = candidate;
+        });
+      });
 
-      let duration = toMinutes(end) - toMinutes(start);
-      if (duration <= 0) duration += 24 * 60;   // event runs past midnight
-
-      return { start, end, duration };
+      return best;
     }
 
     function formatTime12(hours, minutes) {
@@ -542,15 +616,55 @@ Session Hour: 6 Hours"></textarea>
       return h12 + '.' + String(minutes).padStart(2, '0') + period;
     }
 
+    const MONTHS = {
+      jan: 1, feb: 2, mac: 3, mar: 3, apr: 4, mei: 5, may: 5, jun: 6,
+      jul: 7, ogo: 8, aug: 8, sep: 9, okt: 10, oct: 10, nov: 11, dis: 12, dec: 12
+    };
+
+    // "feb", "februari", "february" and "Feb." all reduce to the same three letters.
+    function monthFromName(part) {
+      const key = part.toLowerCase().replace(/[^a-z]/g, '');
+      if (key.length < 3) return null;
+      return MONTHS[key.slice(0, 3)] || null;
+    }
+
+    // "3 Feb" with no year means the coming 3 February, not one in the past.
+    function nearestYear(d, m) {
+      const today = new Date();
+      const year = today.getFullYear();
+      const candidate = new Date(year, m - 1, d);
+      return (today - candidate) / 86400000 > 180 ? year + 1 : year;
+    }
+
+    // Reads 08/08/2026, 3/3/24, 2026-08-08, "3 feb 2027", "Feb 3, 2027", "3 Ogos".
     function parseDate(dateStr) {
       if (!dateStr) return null;
-      const parts = dateStr.trim().split(/[\/.\-\s]+/);
-      if (parts.length < 3) return null;
 
-      const d = parseInt(parts[0], 10);
-      const m = parseInt(parts[1], 10);
-      let y = parseInt(parts[2], 10);
-      if (!Number.isFinite(d) || !Number.isFinite(m) || !Number.isFinite(y)) return null;
+      const parts = String(dateStr).trim().split(/[\/.\-\s,]+/).filter(Boolean);
+      if (parts.length < 2) return null;
+
+      let d = null, m = null, y = null;
+      const namedIdx = parts.findIndex(p => /[a-z]/i.test(p) && monthFromName(p));
+
+      if (namedIdx !== -1) {
+        m = monthFromName(parts[namedIdx]);
+        parts.forEach(function (p, i) {
+          if (i === namedIdx || !/^\d+$/.test(p)) return;
+          const n = parseInt(p, 10);
+          if (p.length === 4 || n > 31) { if (y === null) y = n; }
+          else if (d === null) d = n;
+          else if (y === null) y = n;
+        });
+      } else {
+        if (parts.length < 3) return null;
+        const nums = parts.map(p => parseInt(p, 10));
+        if (nums.some(n => !Number.isFinite(n))) return null;
+        if (parts[0].length === 4) { y = nums[0]; m = nums[1]; d = nums[2]; }   // 2026-08-08
+        else { d = nums[0]; m = nums[1]; y = nums[2]; }
+      }
+
+      if (d === null || m === null) return null;
+      if (y === null) y = nearestYear(d, m);
       if (y < 100) y += 2000;
 
       const dateObj = new Date(y, m - 1, d);
@@ -564,6 +678,15 @@ Session Hour: 6 Hours"></textarea>
         ' (' + DAYS[dateObj.getDay()] + ')';
     }
 
+    // "6 Hours", "6.5 jam", "6h", "6" — only the number matters.
+    function parseStatedHours(str) {
+      if (!str) return null;
+      const match = String(str).replace(',', '.').match(/(\d+(?:\.\d+)?)/);
+      if (!match) return null;
+      const n = parseFloat(match[1]);
+      return Number.isFinite(n) ? n : null;
+    }
+
     // Trims a trailing ".0" so 6 hours reads "6 Hours" and 5.5 reads "5.5 Hours".
     function trimNumber(n) {
       return String(Math.round(n * 100) / 100);
@@ -575,64 +698,153 @@ Session Hour: 6 Hours"></textarea>
 
     /* ---------------- formatting ---------------- */
 
+    // A line of nothing but dashes/equals/underscores/stars — the separator this
+    // app itself emits, and the one people type between pasted bookings.
+    const SEPARATOR_RE = /^\s*[-–—=_*~.\u2022]{3,}\s*$/;
+
+    // Reads "Tarikh: 08/08/2026" and the shapes WhatsApp actually produces:
+    // bolded keys (*Tarikh:* ...), bullets (- Tarikh: ...), numbering (1. Tarikh: ...).
+    function parseField(line) {
+      const stripped = line.replace(/^\s*(?:\d+\s*[).]\s*)?[-–—*_>#\u2022\u00b7\u25aa\u25e6\s]*/, '');
+      const colonIdx = stripped.indexOf(':');
+      if (colonIdx === -1) return null;
+
+      const key = stripped.slice(0, colonIdx).replace(/[*_]/g, '').trim().toLowerCase();
+      if (!key) return null;
+
+      let value = stripped.slice(colonIdx + 1).trim();
+      value = value.replace(/^\*+/, '').replace(/\*+$/, '').trim();   // *bolded value*
+      return { key, value };
+    }
+
+    // Splits the paste into one chunk per booking. A blank line or a separator
+    // line ends a block, and so does a key that the current block already has —
+    // that is the next form starting, whether or not anything was left between them.
+    function splitBlocks(text) {
+      const blocks = [];
+      let current = [];
+      let seen = Object.create(null);
+
+      const flush = () => {
+        if (current.length) blocks.push(current.join('\n'));
+        current = [];
+        seen = Object.create(null);
+      };
+
+      text.replace(/\r\n?/g, '\n').split('\n').forEach(line => {
+        if (!line.trim() || SEPARATOR_RE.test(line)) { flush(); return; }
+
+        const field = parseField(line);
+        if (field) {
+          if (seen[field.key]) flush();
+          seen[field.key] = true;
+        }
+        current.push(line);
+      });
+
+      flush();
+      return blocks;
+    }
+
+    // "Session Hour: 4 Hours (stated) / 5 Hours (from Masa Event)" — both numbers,
+    // so the conflict can be read off the message and put to the client directly.
+    function sessionHourNote(computed, stated, rawStated) {
+      if (computed !== null && stated !== null) {
+        if (Math.abs(computed - stated) <= 0.01) return formatHours(computed);
+        return formatHours(stated) + ' (stated) / ' + formatHours(computed) + ' (from Masa Event)';
+      }
+      if (computed !== null) return formatHours(computed) + ' (from Masa Event)';
+      if (stated !== null) return formatHours(stated) + ' (stated)';
+      return rawStated || '';
+    }
+
+    function field(label, value) {
+      return label + ':' + (value ? ' ' + value : '');
+    }
+
     function formatBlock(block) {
       const data = {};
       block.split('\n').forEach(line => {
-        const colonIdx = line.indexOf(':');
-        if (colonIdx !== -1) {
-          data[line.slice(0, colonIdx).trim().toLowerCase()] = line.slice(colonIdx + 1).trim();
-        }
+        const parsed = parseField(line);
+        if (parsed) data[parsed.key] = parsed.value;
       });
 
       if (!data['tarikh'] && !data['tempat']) return '';
 
       const rawDate = data['tarikh'] || '';
-      const formattedDate = parseDate(rawDate) || rawDate;
-      const tempat = data['tempat'] || '';
-      const typeOfEvent = data['type of event'] || '';
+      const rawMasa = data['masa event'] || '';
+      const statedHours = parseStatedHours(data['session hour']);
 
-      let masaEventFormatted = data['masa event'] || '';
-      let callTimeFormatted = '';
-      let sessionHoursStr = data['session hour'] || '';
-      let totalHours = 0;
-
-      const range = data['masa event'] ? splitRange(data['masa event']) : null;
+      const range = rawMasa ? splitRange(rawMasa) : null;
       const resolved = range ? resolveRange(range[0], range[1]) : null;
 
+      let masaEventFormatted = rawMasa;
+      let callTimeFormatted = '';
+      let sessionHours = null;
+
       if (resolved) {
-        const { start, end, duration } = resolved;
-        masaEventFormatted = formatTime12(start.hours, start.minutes) + ' - ' +
-                             formatTime12(end.hours, end.minutes);
+        masaEventFormatted = formatTime12(resolved.start.hours, resolved.start.minutes) + ' - ' +
+                             formatTime12(resolved.end.hours, resolved.end.minutes);
 
         // Call time = PREP_HOURS before the session starts.
-        const callMins = ((toMinutes(start) - PREP_HOURS * 60) % 1440 + 1440) % 1440;
+        const callMins = ((toMinutes(resolved.start) - PREP_HOURS * 60) % 1440 + 1440) % 1440;
         callTimeFormatted = '*' + formatTime12(Math.floor(callMins / 60), callMins % 60) + '*';
 
         // Round to the nearest half hour so a 5h30m session is not billed as 6h.
-        const sessionHours = Math.round(duration / 30) / 2;
-        sessionHoursStr = formatHours(sessionHours);
-        totalHours = sessionHours + PREP_HOURS;
+        sessionHours = Math.round(resolved.duration / 30) / 2;
       }
 
-      const totalPay = totalHours * RATE_PER_HOUR;
+      // Reasons this roster must not go out until someone confirms it.
+      let warning = '';
+      if (rawMasa && !resolved) {
+        warning = 'Masa Event could not be read';
+      } else if (sessionHours !== null && sessionHours > MAX_SESSION_HOURS) {
+        warning = 'Masa Event runs ' + formatHours(sessionHours) + ', longer than the ' +
+                  formatHours(MAX_SESSION_HOURS) + ' maximum';
+      } else if (sessionHours !== null && statedHours !== null &&
+                 Math.abs(sessionHours - statedHours) > 0.01) {
+        warning = 'Masa Event is ' + formatHours(sessionHours) +
+                  ' but Session Hour says ' + formatHours(statedHours);
+      }
+
+      // Everything but the two conflicting fields is held back on purpose: a
+      // half-empty block cannot be forwarded by mistake, so the flag gets asked about.
+      if (warning) {
+        return [
+          '⚠️ CHECK — ' + warning + '. Confirm before sending.',
+          field('Tarikh', ''),
+          field('Tempat', ''),
+          field('Type of event', ''),
+          field('Call Time', ''),
+          field('Masa Event', masaEventFormatted),
+          field('Session Hour', sessionHourNote(sessionHours, statedHours, data['session hour'])),
+          field('Rate', ''),
+          field('Total Hours', ''),
+          field('Total Pay', ''),
+          field('Roster', '')
+        ].join('\n');
+      }
+
+      // The clock is the source of truth when it parsed; otherwise bill what was stated.
+      const billedHours = sessionHours !== null ? sessionHours : statedHours;
+      const totalHours = billedHours === null ? null : billedHours + PREP_HOURS;
 
       return [
-        'Tarikh: ' + formattedDate,
-        'Tempat: ' + tempat,
-        'Type of event: ' + typeOfEvent,
-        'Call Time: ' + callTimeFormatted,
-        'Masa Event: ' + masaEventFormatted,
-        'Session Hour: ' + sessionHoursStr,
-        'Rate: RM ' + RATE_PER_HOUR + '/h',
-        'Total Hours: ' + formatHours(totalHours),
-        'Total Pay: RM ' + trimNumber(totalPay),
-        'Roster:'
+        field('Tarikh', parseDate(rawDate) || rawDate),
+        field('Tempat', data['tempat'] || ''),
+        field('Type of event', data['type of event'] || ''),
+        field('Call Time', callTimeFormatted),
+        field('Masa Event', masaEventFormatted),
+        field('Session Hour', billedHours === null ? (data['session hour'] || '') : formatHours(billedHours)),
+        field('Rate', 'RM ' + RATE_PER_HOUR + '/h'),
+        field('Total Hours', totalHours === null ? '' : formatHours(totalHours)),
+        field('Total Pay', totalHours === null ? '' : 'RM ' + trimNumber(totalHours * RATE_PER_HOUR)),
+        field('Roster', '')
       ].join('\n');
     }
 
     function processInput() {
-      const formatted = inputEl.value
-        .split(/\n\s*\n/)
+      const formatted = splitBlocks(inputEl.value)
         .map(formatBlock)
         .filter(Boolean)
         .join('\n-----------------------------------------\n');
